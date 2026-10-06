@@ -1,268 +1,117 @@
 import React, { useEffect, useState } from "react";
-import {
-  View,
-  Text,
-  ImageBackground,
-  StyleSheet,
-  Image,
-  ScrollView,
-  Button,
-  TouchableOpacity,
-} from "react-native";
-import {
-  getDownloadURL,
-  getStorage,
-  ref,
-  uploadBytesResumable,
-} from "firebase/storage";
+import { View, Text, ImageBackground, StyleSheet, Image, TouchableOpacity, Alert } from "react-native";
+import { getDownloadURL, getStorage, ref, uploadBytesResumable } from "firebase/storage";
+import { firebaseAuth } from "../firebaseConfig";
+
+const DETECTION_URL = "https://us-central1-dermavision-aad34.cloudfunctions.net/detectSkinDisease";
 
 const Results = ({ route, navigation }) => {
-  let { imageDisease } = route.params;
-  const [imagePic, setImagePic] = useState(imageDisease);
+  const { imageDisease } = route.params;
   const [imageURL, setImageURL] = useState();
-  const [riyal, setRiyal] = useState(false);
-  const [Data, setData] = useState();
+  const [showResults, setShowResults] = useState(false);
+  const [data, setData] = useState();
   const [pic, setPic] = useState(null);
 
-  const uploadToFirebase = async (uri, name, onProgress) => {
-    const fetchResponse = await fetch(uri);
-    const theBlob = await fetchResponse.blob();
-
+  const uploadToFirebase = async (uri, name) => {
+    const response = await fetch(uri);
+    const blob = await response.blob();
     const imageRef = ref(getStorage(), `images/${name}`);
-
-    const uploadTask = uploadBytesResumable(imageRef, theBlob);
+    const uploadTask = uploadBytesResumable(imageRef, blob);
 
     return new Promise((resolve, reject) => {
       uploadTask.on(
         "state_changed",
-        (snapshot) => {
-          const progress =
-            (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
-          onProgress && onProgress(progress);
-        },
-        (error) => {
-          // Handle unsuccessful uploads
-          console.log(error);
-          reject(error);
-        },
-        async () => {
-          const downloadUrl = await getDownloadURL(uploadTask.snapshot.ref);
-          resolve({
-            downloadUrl,
-            metadata: uploadTask.snapshot.metadata,
-          });
-          console.log(downloadUrl);
-          setImageURL(`${downloadUrl}`);
-        }
+        null,
+        reject,
+        async () => resolve(await getDownloadURL(uploadTask.snapshot.ref))
       );
     });
   };
 
-  const detection = () => {
-    // Your PAT (Personal Access Token) can be found in the Account's Security section
-    const PAT = "4e8f5a6d3d5742f7b66b4e9a640d9678";
-    // Specify the correct user_id/app_id pairings
-    // Since you're making inferences outside your app's scope
-    const USER_ID = "silent";
-    const APP_ID = "DermaVisionV2";
-    // Change these to whatever model and image URL you want to use
-    const MODEL_ID = "xfer-learn-skindisease";
-    const MODEL_VERSION_ID = "e14b656e8e28465b81c2425e6ebdd2b2";
-    const IMAGE_URL = `${imageURL}`;
+  const detection = async () => {
+    try {
+      if (!imageURL) return;
+      const user = firebaseAuth.currentUser;
+      if (!user) {
+        Alert.alert("Login required", "Please sign in before scanning.");
+        return;
+      }
 
-    const requestOptions = {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        Authorization: "Key " + PAT,
-      },
-    if (MODEL_ID && MODEL_VERSION_ID && PAT) {
-      fetch(
-        "https://api.clarifai.com/v2/models/" +
-          MODEL_ID +
-          "/versions/" +
-          MODEL_VERSION_ID +
-          "/outputs",
-        requestOptions
-      )
-        .then((response) => response.json())
-        .then((result) => {
-          // console.log("API Response:", result);
+      const idToken = await user.getIdToken();
+      const response = await fetch(DETECTION_URL, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({ imageUrl: imageURL }),
+      });
 
-          if (result && result.outputs && result.outputs.length > 0) {
-            const firstOutput = result.outputs[0];
-            const data = firstOutput.data;
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Inference failed");
 
-            if (data) {
-              console.log("Data:", data);
-              setData(data);
-\
-                for (const region of regions) {
-                  const concepts = region.data && region.data.concepts;
+      const resultData = result?.outputs?.[0]?.data;
+      if (!resultData?.concepts?.length) throw new Error("No prediction was returned.");
 
-                  if (concepts) {
-                    for (const concept of concepts) {
-                      const name = concept.name;
-                      const value = concept.value && concept.value.toFixed(4);
-                      // console.log(`${name}: ${value}`);
-                    }
-                  }
-                }
-              } else {
-                console.log("No regions found in the response");
-              }
-            } else {
-              console.log("No data found in the response");
-            }
-          } else {
-            console.log("Invalid response format");
-          }
-        })
-        .catch((error) => {
-          console.error("Error fetching data:", error);
-        });
-    } else {
-      console.log("Missing required parameters for the fetch request");
+      setData(resultData);
+      setShowResults(true);
+    } catch (error) {
+      console.error("Detection error:", error);
+      Alert.alert("Scan failed", "We couldn't analyze the image. Please try again.");
     }
   };
+
   useEffect(() => {
-    const smth = async () => {
-      const imageName2 = imageDisease.substring(
-        imageDisease.lastIndexOf("/") + 1
-      );
+    const upload = async () => {
+      try {
+        const imageName = imageDisease.substring(imageDisease.lastIndexOf("/") + 1);
+        setPic(imageName);
+        setImageURL(await uploadToFirebase(imageDisease, imageName));
+      } catch (error) {
+        console.error("Upload error:", error);
+        Alert.alert("Upload failed", "We couldn't upload the image.");
+      }
+    };
+    upload();
+  }, [imageDisease]);
 
-      setImagePic(imageName2);
-
-      // console.log("1: ", imageDisease);
-      // console.log("2: ", imagePic);
-      const uri = imageDisease;
-      const uploadResp = await uploadToFirebase(uri, imageName2, (v) => {
-        // conso
-
-    smth();
-  }, []);
+  const topConcept = data?.concepts?.[0];
+  const riskPercent = topConcept ? Math.round(topConcept.value * 100) : 0;
 
   return (
     <View style={styles.main1}>
       <ImageBackground
         style={styles.main}
-        source={
-          imageURL
-            ? require("../assets/QuestionsFinal.png")
-            : require("../assets/DermaVisio_Loading.gif")
-        }
+        source={imageURL ? require("../assets/QuestionsFinal.png") : require("../assets/DermaVisio_Loading.gif")}
       >
-        {imageURL ? (
-          !riyal ? (
-            <>
-              <Image
-                source={{ uri: imageDisease }}
-                style={{ width: 200, height: 200, borderRadius: 60 }}
-              />
-              <TouchableOpacity
-                style={styles.buttonWrapper}
-                onPress={detection}
-              >
-                <View style={styles.button}>
-                  <Text style={styles.buttonText}>Get Your Results</Text>
-                </View>
-              </TouchableOpacity>
-            </>
-          ) : (
-            <View
-              style={{
-                width: "100%",
-                height: "100%",
-                // alignItems: "center",
-                justifyContent: "center",
-                paddingHorizontal: 20,
-                gap: 50,
-              }}
-            >
-              <Text style={{ fontSize: 30, fontWeight: "500", lineHeight: 45 }}>
-                Based on your answers and scan, we think it’s{" "}
-                <Text
-                  style={{ fontSize: 30, fontWeight: "bold", lineHeight: 45 }}
-                >{`${Data.concepts[0].name}.`}</Text>
+        {imageURL && !showResults ? (
+          <>
+            <Image source={{ uri: imageDisease }} style={{ width: 200, height: 200, borderRadius: 60 }} />
+            <TouchableOpacity style={styles.buttonWrapper} onPress={detection}>
+              <View><Text style={styles.buttonText}>Get Your Results</Text></View>
+            </TouchableOpacity>
+          </>
+        ) : showResults && topConcept ? (
+          <View style={styles.results}>
+            <Text style={styles.heading}>
+              Based on your answers and scan, we think it’s <Text style={styles.bold}>{topConcept.name}.</Text>
+            </Text>
+            <Image source={{ uri: imageDisease }} style={styles.resultImage} />
+            <View>
+              <Text style={styles.subheading}>Your Risk Level Is</Text>
+              <Text style={styles.percentage}>{riskPercent}%</Text>
+              <Text style={styles.description}>
+                {riskPercent > 50
+                  ? "We recommend that you consult a dermatologist based on the scan result."
+                  : "The scan result appears mild, but consider consulting a dermatologist if you have concerns."}
               </Text>
-              {/* <Image
-                source={require("../assets/End.png")}
-                style={{
-                  width: "30%",
-                  alignSelf: "center",
-                  height: "30%",
-                  aspectRatio: 1 / 1,
-                  borderRadius: 10,
-                }}
-              /> */}
-              <Image
-                source={{ uri: imageDisease }}
-                style={{
-                  width: 300,
-                  height: 300,
-                  borderRadius: 80,
-                  marginVertical: -30,
-                  alignSelf: "center",
-                }}
-              />
-              <View style={{ marginTop: 10 }}>
-                <Text
-                  style={{ fontSize: 20, fontWeight: "500", lineHeight: 35 }}
-                >
-                  Your Risk Level Is
-                </Text>
-                <Text
-                  style={{
-                    fontSize: 50,
-                    fontWeight: "800",
-                    lineHeight: 35,
-                    padding: 20,
-                    marginTop: 30,
-                    alignSelf: "center",
-                    color: "#000",
-                  }}
-                >{`${Math.round(Data.concepts[0].value * 100)}%`}</Text>
-                {Math.round(Data.concepts[0].value * 100) > 50 ? (
-                  <>
-                    <Text style={{ fontSize: 18, lineHeight: 25 }}>
-                      We recommend you to visit a dermatologist based on your
-                      skin conditions.
-                    </Text>
-                    <TouchableOpacity
-                      style={styles.buttonWrapper}
-                      onPress={() => navigation.navigate("Camera", { pic })}
-                    >
-                      <View style={styles.button}>
-                        <Text style={styles.buttonText}>
-                          Recheck Your Results
-                        </Text>
-                      </View>
-                    </TouchableOpacity>
-                  </>
-                ) : (
-                  <>
-                    <Text style={{ fontSize: 18, lineHeight: 25 }}>
-                      We recommend you to visit a dermatologist though we find
-                      your conditions mild.
-                    </Text>
-                    <TouchableOpacity
-                      style={styles.buttonWrapper}
-                      onPress={() => navigation.navigate("Camera", { pic })}
-                    >
-                      <View style={styles.button}>
-                        <Text style={styles.buttonText}>
-                          Recheck Your Results
-                        </Text>
-                      </View>
-                    </TouchableOpacity>
-                  </>
-                )}
-              </View>
+              <TouchableOpacity style={styles.buttonWrapper} onPress={() => navigation.navigate("Camera", { pic })}>
+                <View><Text style={styles.buttonText}>Recheck Your Results</Text></View>
+              </TouchableOpacity>
             </View>
-          )
-        ) : (
-          <></>
-        )}
+          </View>
+        ) : null}
       </ImageBackground>
     </View>
   );
@@ -271,67 +120,15 @@ const Results = ({ route, navigation }) => {
 export default Results;
 
 const styles = StyleSheet.create({
-  main1: {
-    flex: 1,
-  },
-  main: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  report: {
-    width: "80%",
-    backgroundColor: "#313841",
-    borderRadius: 10,
-    paddingHorizontal: 20,
-    paddingVertical: 30,
-  },
-  risk: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    padding: 10,
-  },
-  headRisk: {
-    fontSize: 18,
-    color: "#fff",
-  },
-  buttonWrapper: {
-    backgroundColor: "#0773da",
-    borderRadius: 11,
-    marginTop: 20,
-    paddingHorizontal: 30,
-    paddingVertical: 10,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  button: {},
-  buttonText: {
-    color: "#fff",
-    fontWeight: "bold",
-    fontSize: 30,
-  },
-  nig1: {
-    fontSize: 40,
-    fontWeight: "800",
-    lineHeight: 35,
-    padding: 20,
-    alignSelf: "center",
-    color: "#000",
-  },
-  nig2: {
-    fontSize: 40,
-    fontWeight: "800",
-    lineHeight: 35,
-    padding: 20,
-    alignSelf: "center",
-    color: "#FF8A00",
-  },
-  nig3: {
-    fontSize: 40,
-    fontWeight: "800",
-    lineHeight: 35,
-    padding: 20,
-    alignSelf: "center",
-    color: "#FF0000",
-  },
+  main1: { flex: 1 },
+  main: { flex: 1, alignItems: "center", justifyContent: "center" },
+  results: { width: "100%", height: "100%", justifyContent: "center", paddingHorizontal: 20, gap: 35 },
+  heading: { fontSize: 30, fontWeight: "500", lineHeight: 45 },
+  bold: { fontWeight: "bold" },
+  resultImage: { width: 300, height: 300, borderRadius: 80, alignSelf: "center" },
+  subheading: { fontSize: 20, fontWeight: "500", lineHeight: 35 },
+  percentage: { fontSize: 50, fontWeight: "800", lineHeight: 55, padding: 20, alignSelf: "center" },
+  description: { fontSize: 18, lineHeight: 25 },
+  buttonWrapper: { backgroundColor: "#0773da", borderRadius: 11, marginTop: 20, paddingHorizontal: 30, paddingVertical: 10, justifyContent: "center", alignItems: "center" },
+  buttonText: { color: "#fff", fontWeight: "bold", fontSize: 22 }
 });
